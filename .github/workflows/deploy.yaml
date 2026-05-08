@@ -17,6 +17,7 @@ env:
   WORK_DIR: /opt/eureka
   HEALTH_RETRIES: 30
   HEALTH_INTERVAL: 10
+  SSH_USER: ${{ vars.GCP_SSH_USER }}
 
 jobs:
   build-and-push:
@@ -144,10 +145,11 @@ jobs:
       - name: Sync compose file to ${{ matrix.vm }}
         run: |
           gcloud compute scp deploy/docker-compose.prod.yaml \
-            ${{ matrix.vm }}:/tmp/docker-compose.prod.yaml \
+            ${SSH_USER}@${{ matrix.vm }}:/tmp/docker-compose.prod.yaml \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT" \
-            --tunnel-through-iap
+            --tunnel-through-iap \
+            --ssh-flag="-o StrictHostKeyChecking=no"
 
       - name: Deploy and verify on ${{ matrix.vm }}
         id: deploy_run
@@ -155,10 +157,11 @@ jobs:
           NEW_TAG: ${{ needs.build-and-push.outputs.image_tag }}
           PROFILE: ${{ matrix.profile }}
         run: |
-          gcloud compute ssh ${{ matrix.vm }} \
+          gcloud compute ssh ${SSH_USER}@${{ matrix.vm }} \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT" \
             --tunnel-through-iap \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
             --command="
               set -e
 
@@ -209,10 +212,11 @@ jobs:
           set +e
 
           attempt_rollback() {
-            gcloud compute ssh ${{ matrix.vm }} \
+            gcloud compute ssh ${SSH_USER}@${{ matrix.vm }} \
               --zone="$GCP_ZONE" \
               --project="$GCP_PROJECT" \
               --tunnel-through-iap \
+              --ssh-flag="-o StrictHostKeyChecking=no" \
               --command="
                 set -e
                 cd $WORK_DIR
@@ -290,10 +294,11 @@ jobs:
 
           for vm in eureka-server-1 eureka-server-2; do
             echo "--- Checking peer registration on $vm ---"
-            gcloud compute ssh "$vm" \
+            gcloud compute ssh ${SSH_USER}@"$vm" \
               --zone="$GCP_ZONE" \
               --project="$GCP_PROJECT" \
               --tunnel-through-iap \
+              --ssh-flag="-o StrictHostKeyChecking=no" \
               --command="
                 set -e
                 for i in \$(seq 1 12); do
