@@ -1,0 +1,334 @@
+name: Deploy Eureka Server
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      force_apply_retention_policy:
+        description: "AR retention policy 적용"
+        type: boolean
+        default: false
+
+env:
+  GCP_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+  GCP_ZONE: ${{ vars.GCP_ZONE }}
+  AR_IMAGE_PATH: ${{ vars.AR_IMAGE_PATH }}
+  WORK_DIR: /opt/eureka
+  HEALTH_RETRIES: 30
+  HEALTH_INTERVAL: 10
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      ar_region: ${{ steps.meta.outputs.region }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure Docker for AR
+        run: gcloud auth configure-docker "$(echo "$AR_IMAGE_PATH" | cut -d/ -f1)" --quiet
+
+      - name: Resolve image metadata
+        id: meta
+        run: |
+          echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          REGION=$(echo "$AR_IMAGE_PATH" | cut -d- -f1,2)
+          echo "region=${REGION}" >> "$GITHUB_OUTPUT"
+
+      - name: Apply AR Image Retention Policy
+        if: |
+          contains(toJSON(github.event.commits.*.modified), 'deploy/ar-image-retention-policy.json') ||
+          contains(toJSON(github.event.commits.*.added), 'deploy/ar-image-retention-policy.json') ||
+          (github.event_name == 'workflow_dispatch' && inputs.force_apply_retention_policy)
+        run: |
+          REPO_NAME=$(echo "$AR_IMAGE_PATH" | cut -d/ -f3)
+          POLICY_FILE="deploy/ar-image-retention-policy.json"
+
+          if [ ! -f "$POLICY_FILE" ]; then
+            echo "Error: $POLICY_FILE not found"
+            exit 1
+          fi
+
+          gcloud artifacts repositories set-cleanup-policies "$REPO_NAME" \
+            --project="$GCP_PROJECT" \
+            --location="${{ steps.meta.outputs.region }}" \
+            --policy="$POLICY_FILE" \
+            --quiet
+          echo "Successfully synced retention policy from $POLICY_FILE"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.AR_IMAGE_PATH }}:${{ steps.meta.outputs.tag }}
+            ${{ env.AR_IMAGE_PATH }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - vm: eureka-server-1
+            profile: eureka-server-1
+          - vm: eureka-server-2
+            profile: eureka-server-2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve rollback target
+        id: rollback
+        run: |
+          STABLE=$(gcloud artifacts docker tags list "$AR_IMAGE_PATH" \
+            --project="$GCP_PROJECT" \
+            --filter="tag=stable" \
+            --format="value(tag)" 2>/dev/null | head -n1)
+
+          if [ -n "$STABLE" ]; then
+            echo "tag=stable" >> "$GITHUB_OUTPUT"
+            echo "Rollback target: stable tag (verified image exists in AR)"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "No stable tag yet — first successful deploy will create it. Rollback will be skipped on this run."
+          fi
+
+      - name: Sync compose file to ${{ matrix.vm }}
+        run: |
+          gcloud compute scp deploy/docker-compose.prod.yaml \
+            ${{ matrix.vm }}:/tmp/docker-compose.prod.yaml \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT" \
+            --tunnel-through-iap
+
+      - name: Deploy and verify on ${{ matrix.vm }}
+        id: deploy_run
+        env:
+          NEW_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          gcloud compute ssh ${{ matrix.vm }} \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --command="
+              set -e
+
+              sudo mkdir -p $WORK_DIR
+              sudo mv /tmp/docker-compose.prod.yaml $WORK_DIR/docker-compose.prod.yaml
+              cd $WORK_DIR
+
+              sudo rm -f .env
+
+              export IMAGE_TAG='$NEW_TAG'
+              export EUREKA_PROFILE='$PROFILE'
+
+              sudo -E docker compose -f docker-compose.prod.yaml pull
+              sudo -E docker compose -f docker-compose.prod.yaml up -d
+
+              echo 'Checking actuator health (max $HEALTH_RETRIES x ${HEALTH_INTERVAL}s)...'
+              HEALTHY=0
+              for i in \$(seq 1 $HEALTH_RETRIES); do
+                if curl -sf http://localhost:8761/actuator/health \
+                    | grep -q '\"status\":\"UP\"'; then
+                  echo \"Actuator UP (attempt \$i)\"
+                  HEALTHY=1
+                  break
+                fi
+                echo \"Waiting for service... (\$i/$HEALTH_RETRIES)\"
+                sleep $HEALTH_INTERVAL
+              done
+
+              if [ \"\$HEALTHY\" != '1' ]; then
+                echo 'Actuator health check failed.'
+                exit 1
+              fi
+
+              if ! curl -sf -H 'Accept: application/json' \
+                  http://localhost:8761/eureka/apps > /dev/null; then
+                echo 'Warning: actuator UP but /eureka/apps not responding.'
+                exit 1
+              fi
+              echo 'Eureka registry endpoint reachable.'
+            "
+
+      - name: Rollback ${{ matrix.vm }}
+        if: failure() && steps.deploy_run.conclusion == 'failure' && steps.rollback.outputs.tag != ''
+        env:
+          ROLLBACK_TAG: ${{ steps.rollback.outputs.tag }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set +e
+
+          attempt_rollback() {
+            gcloud compute ssh ${{ matrix.vm }} \
+              --zone="$GCP_ZONE" \
+              --project="$GCP_PROJECT" \
+              --tunnel-through-iap \
+              --command="
+                set -e
+                cd $WORK_DIR
+
+                sudo rm -f .env
+
+                echo 'Stopping any failed containers...'
+                sudo docker compose -f docker-compose.prod.yaml down --remove-orphans -t 5 || true
+
+                export IMAGE_TAG='$ROLLBACK_TAG'
+                export EUREKA_PROFILE='$PROFILE'
+
+                echo 'Pulling rollback image: $ROLLBACK_TAG'
+                sudo -E docker compose -f docker-compose.prod.yaml pull
+                sudo -E docker compose -f docker-compose.prod.yaml up -d
+
+                echo 'Verifying rollback container health (max 18 x 10s)...'
+                for i in \$(seq 1 18); do
+                  if curl -sf http://localhost:8761/actuator/health \
+                      | grep -q '\"status\":\"UP\"'; then
+                    echo \"Rollback container UP (attempt \$i)\"
+                    exit 0
+                  fi
+                  sleep 10
+                done
+
+                echo 'Rollback container did not become healthy.'
+                exit 1
+              "
+          }
+
+          for attempt in 1 2 3; do
+            echo "::group::Rollback attempt $attempt/3 on ${{ matrix.vm }}"
+            attempt_rollback
+            RC=$?
+            echo "::endgroup::"
+
+            if [ $RC -eq 0 ]; then
+              echo "Rollback succeeded on attempt $attempt."
+              exit 0
+            fi
+
+            echo "Rollback attempt $attempt failed (exit=$RC)."
+            if [ $attempt -lt 3 ]; then
+              echo "Retrying in 15 seconds..."
+              sleep 15
+            fi
+          done
+
+          echo "::error::All rollback attempts failed on ${{ matrix.vm }}. Manual intervention required."
+          exit 1
+
+  verify-peer-replication:
+    needs: [ build-and-push, deploy ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Verify each peer registers the other
+        run: |
+          sleep 30
+
+          for vm in eureka-server-1 eureka-server-2; do
+            echo "--- Checking peer registration on $vm ---"
+            gcloud compute ssh "$vm" \
+              --zone="$GCP_ZONE" \
+              --project="$GCP_PROJECT" \
+              --tunnel-through-iap \
+              --command="
+                set -e
+                for i in \$(seq 1 12); do
+                  COUNT=\$(curl -sf -H 'Accept: application/json' \
+                    http://localhost:8761/eureka/apps/EUREKA-SERVER 2>/dev/null \
+                    | grep -o '\"instanceId\"' | wc -l || echo 0)
+                  if [ \"\$COUNT\" -ge 2 ]; then
+                    echo \"Peer replication OK on \$(hostname): \$COUNT instances registered\"
+                    exit 0
+                  fi
+                  echo \"Waiting for peer registration... (\$i/12, current=\$COUNT)\"
+                  sleep 10
+                done
+                echo 'Peer replication NOT confirmed within 2 minutes.'
+                exit 1
+              "
+          done
+
+  promote-stable:
+    needs: [ build-and-push, deploy, verify-peer-replication ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Promote new SHA to :stable tag
+        run: |
+          NEW_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          echo "Promoting ${AR_IMAGE_PATH}:${NEW_TAG} -> ${AR_IMAGE_PATH}:stable"
+          gcloud artifacts docker tags add \
+            "${AR_IMAGE_PATH}:${NEW_TAG}" \
+            "${AR_IMAGE_PATH}:stable" \
+            --quiet
+          echo "Stable tag updated. Future rollbacks will use this verified image."
