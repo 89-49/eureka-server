@@ -116,8 +116,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Authenticate to GCP
+        id: auth
         uses: google-github-actions/auth@v2
         with:
+          token_format: 'access_token'
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SA_EMAIL }}
           project_id: ${{ vars.GCP_PROJECT_ID }}
@@ -154,17 +156,18 @@ jobs:
         env:
           NEW_TAG: ${{ needs.build-and-push.outputs.image_tag }}
           PROFILE: ${{ matrix.profile }}
+          AR_TOKEN: ${{ steps.auth.outputs.access_token }}
         run: |
           REGISTRY_HOST=$(echo "$AR_IMAGE_PATH" | cut -d/ -f1)
-          
+
           gcloud compute ssh ${{ matrix.vm }} \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT" \
             --tunnel-through-iap \
             --command="
               set -e
-          
-              gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin https://$REGISTRY_HOST
+
+              echo '$AR_TOKEN' | sudo docker login -u oauth2accesstoken --password-stdin https://$REGISTRY_HOST
           
               sudo mkdir -p $WORK_DIR
               sudo mv /tmp/docker-compose.prod.yaml $WORK_DIR/docker-compose.prod.yaml
@@ -208,8 +211,10 @@ jobs:
         env:
           ROLLBACK_TAG: ${{ steps.rollback.outputs.tag }}
           PROFILE: ${{ matrix.profile }}
+          AR_TOKEN: ${{ steps.auth.outputs.access_token }}
         run: |
           set +e
+          REGISTRY_HOST=$(echo "$AR_IMAGE_PATH" | cut -d/ -f1)
 
           attempt_rollback() {
             gcloud compute ssh ${{ matrix.vm }} \
@@ -218,6 +223,9 @@ jobs:
               --tunnel-through-iap \
               --command="
                 set -e
+
+                echo '$AR_TOKEN' | sudo docker login -u oauth2accesstoken --password-stdin https://$REGISTRY_HOST
+
                 cd $WORK_DIR
 
                 sudo rm -f .env
