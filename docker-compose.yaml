@@ -1,11 +1,27 @@
 services:
-  eureka-server:
-    container_name: eureka-server
+  eureka-server-1:
+    container_name: eureka-server-1
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      - SPRING_PROFILES_ACTIVE=eureka-server-1
+      - TZ=Asia/Seoul
     ports:
       - "8761:8761"
+    networks:
+      - pgsg-network
+
+  eureka-server-2:
+    container_name: eureka-server-2
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - SPRING_PROFILES_ACTIVE=eureka-server-2
+      - TZ=Asia/Seoul
+    ports:
+      - "8762:8761"
     networks:
       - pgsg-network
 
