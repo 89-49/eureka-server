@@ -1,15 +1,54 @@
-server:
-  port: 8761
-
 spring:
   application:
     name: eureka-server
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always
+
+eureka:
+  server:
+    enable-self-preservation: true
+    renewal-percent-threshold: 0.49
+  client:
+    register-with-eureka: true
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: eureka-server-1
+
+server:
+  port: 8761
+
 eureka:
   instance:
-    hostname: localhost
+    hostname: eureka-server-1
   client:
-    register-with-eureka: false
-    fetch-registry: false
     service-url:
-      defaultZone: http://localhost:8761/eureka/
+      defaultZone: http://eureka-server-2:8761/eureka/
+
+---
+spring:
+  config:
+    activate:
+      on-profile: eureka-server-2
+
+server:
+  port: 8761
+
+eureka:
+  instance:
+    hostname: eureka-server-2
+  client:
+    service-url:
+      defaultZone: http://eureka-server-1:8761/eureka/

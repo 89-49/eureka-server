@@ -1,0 +1,10 @@
+services:
+  eureka-server:
+    image: "asia-northeast3-docker.pkg.dev/pgsg-ddangme/pgsg-images/eureka-server:${IMAGE_TAG:?IMAGE_TAG_REQUIRED}"
+    container_name: eureka-server
+    environment:
+      - SPRING_PROFILES_ACTIVE=${EUREKA_PROFILE:?EUREKA_PROFILE_REQUIRED}
+      - TZ=Asia/Seoul
+    ports:
+      - "8761:8761"
+    restart: unless-stopped
