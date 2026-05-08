@@ -149,7 +149,7 @@ jobs:
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT" \
             --tunnel-through-iap \
-            --ssh-flag="-o StrictHostKeyChecking=no"
+            --scp-flag="-o StrictHostKeyChecking=no"
 
       - name: Deploy and verify on ${{ matrix.vm }}
         id: deploy_run
