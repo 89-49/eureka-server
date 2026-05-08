@@ -154,28 +154,29 @@ jobs:
         env:
           NEW_TAG: ${{ needs.build-and-push.outputs.image_tag }}
           PROFILE: ${{ matrix.profile }}
-          REGISTRY_HOST: ${{ steps.meta.outputs.registry_host }}
         run: |
+          REGISTRY_HOST=$(echo "$AR_IMAGE_PATH" | cut -d/ -f1)
+          
           gcloud compute ssh ${{ matrix.vm }} \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT" \
             --tunnel-through-iap \
             --command="
               set -e
-
+          
               gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin https://$REGISTRY_HOST
-
+          
               sudo mkdir -p $WORK_DIR
               sudo mv /tmp/docker-compose.prod.yaml $WORK_DIR/docker-compose.prod.yaml
               cd $WORK_DIR
-
+          
               sudo rm -f .env
               export IMAGE_TAG='$NEW_TAG'
               export EUREKA_PROFILE='$PROFILE'
-
+          
               sudo -E docker compose -f docker-compose.prod.yaml pull
               sudo -E docker compose -f docker-compose.prod.yaml up -d
-
+          
               echo 'Checking actuator health (max $HEALTH_RETRIES x ${HEALTH_INTERVAL}s)...'
               HEALTHY=0
               for i in \$(seq 1 $HEALTH_RETRIES); do
@@ -188,12 +189,12 @@ jobs:
                 echo \"Waiting for service... (\$i/$HEALTH_RETRIES)\"
                 sleep $HEALTH_INTERVAL
               done
-
+          
               if [ \"\$HEALTHY\" != '1' ]; then
                 echo 'Actuator health check failed.'
                 exit 1
               fi
-
+          
               if ! curl -sf -H 'Accept: application/json' \
                   http://localhost:8761/eureka/apps > /dev/null; then
                 echo 'Warning: actuator UP but /eureka/apps not responding.'
