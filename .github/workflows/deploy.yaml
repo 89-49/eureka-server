@@ -33,8 +33,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Authenticate to GCP
+        id: auth
         uses: google-github-actions/auth@v2
         with:
+          token_format: 'access_token'
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SA_EMAIL }}
           project_id: ${{ vars.GCP_PROJECT_ID }}
@@ -42,18 +44,14 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Configure Docker for AR
-        run: gcloud auth configure-docker "$(echo "$AR_IMAGE_PATH" | cut -d/ -f1)" --quiet
-
       - name: Resolve image metadata
         id: meta
         run: |
           echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           REGION=$(echo "$AR_IMAGE_PATH" | cut -d- -f1,2)
           echo "region=${REGION}" >> "$GITHUB_OUTPUT"
+          REGISTRY_HOST=$(echo "$AR_IMAGE_PATH" | cut -d/ -f1)
+          echo "registry_host=${REGISTRY_HOST}" >> "$GITHUB_OUTPUT"
 
       - name: Apply AR Image Retention Policy
         if: |
@@ -75,6 +73,16 @@ jobs:
             --policy="$POLICY_FILE" \
             --quiet
           echo "Successfully synced retention policy from $POLICY_FILE"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.meta.outputs.registry_host }}
+          username: 'oauth2accesstoken'
+          password: ${{ steps.auth.outputs.access_token }}
 
       - name: Build and push image
         uses: docker/build-push-action@v5
