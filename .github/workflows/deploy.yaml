@@ -154,6 +154,7 @@ jobs:
         env:
           NEW_TAG: ${{ needs.build-and-push.outputs.image_tag }}
           PROFILE: ${{ matrix.profile }}
+          REGISTRY_HOST: ${{ steps.meta.outputs.registry_host }}
         run: |
           gcloud compute ssh ${{ matrix.vm }} \
             --zone="$GCP_ZONE" \
@@ -162,12 +163,13 @@ jobs:
             --command="
               set -e
 
+              gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin https://$REGISTRY_HOST
+
               sudo mkdir -p $WORK_DIR
               sudo mv /tmp/docker-compose.prod.yaml $WORK_DIR/docker-compose.prod.yaml
               cd $WORK_DIR
 
               sudo rm -f .env
-
               export IMAGE_TAG='$NEW_TAG'
               export EUREKA_PROFILE='$PROFILE'
 
