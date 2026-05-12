@@ -1,11 +1,10 @@
 [
   {
-    "name": "keep-latest-3-images",
-    "action": {
-      "type": "Keep"
-    },
+    "name": "delete-old-images",
+    "action": { "type": "delete" },
     "condition": {
-      "keepCount": 3
+      "tagState": "untagged",
+      "olderThan": "14d"
     }
   }
 ]
