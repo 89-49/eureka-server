@@ -176,6 +176,7 @@ jobs:
               cd $WORK_DIR
           
               sudo rm -f .env
+              export AR_IMAGE_PATH='$AR_IMAGE_PATH'
               export IMAGE_TAG='$NEW_TAG'
               export EUREKA_PROFILE='$PROFILE'
           
@@ -234,7 +235,8 @@ jobs:
 
                 echo 'Stopping any failed containers...'
                 sudo docker compose -f docker-compose.prod.yaml down --remove-orphans -t 5 || true
-
+                
+                export AR_IMAGE_PATH='$AR_IMAGE_PATH'
                 export IMAGE_TAG='$ROLLBACK_TAG'
                 export EUREKA_PROFILE='$PROFILE'
 
