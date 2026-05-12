@@ -180,8 +180,8 @@ jobs:
               export IMAGE_TAG='$NEW_TAG'
               export EUREKA_PROFILE='$PROFILE'
           
-              sudo -E docker compose -f docker-compose.prod.yaml pull
-              sudo -E docker compose -f docker-compose.prod.yaml up -d
+              sudo -E DOCKER_CONFIG=/root/.docker docker compose -f docker-compose.prod.yaml pull
+              sudo -E DOCKER_CONFIG=/root/.docker docker compose -f docker-compose.prod.yaml up -d
           
               echo 'Checking actuator health (max $HEALTH_RETRIES x ${HEALTH_INTERVAL}s)...'
               HEALTHY=0
@@ -241,8 +241,8 @@ jobs:
                 export EUREKA_PROFILE='$PROFILE'
 
                 echo 'Pulling rollback image: $ROLLBACK_TAG'
-                sudo -E docker compose -f docker-compose.prod.yaml pull
-                sudo -E docker compose -f docker-compose.prod.yaml up -d
+                sudo -E DOCKER_CONFIG=/root/.docker docker compose -f docker-compose.prod.yaml pull
+                sudo -E DOCKER_CONFIG=/root/.docker docker compose -f docker-compose.prod.yaml up -d
 
                 echo 'Verifying rollback container health (max 18 x 10s)...'
                 for i in \$(seq 1 18); do
